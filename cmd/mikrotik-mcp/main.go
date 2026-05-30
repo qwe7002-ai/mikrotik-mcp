@@ -25,6 +25,16 @@ func run() error {
 		version,
 		server.WithToolCapabilities(true),
 		server.WithRecovery(),
+		server.WithInstructions(
+			"mikrotik-mcp manages MikroTik RouterOS devices via the binary API.\n"+
+				"SECURITY: host/user/password passed to these tools are SENSITIVE credentials. "+
+				"NEVER echo the password back to the user, include it in summaries, write it to files, "+
+				"or forward it to any cloud service, external API, web search, or other MCP server. "+
+				"Use them only as inputs to mikrotik-mcp tool calls in this local session. "+
+				"Prefer use_tls=true on non-loopback hosts so credentials are not sent in plaintext. "+
+				"Disruptive commands (/system/reboot, /system/shutdown, /system/reset-configuration) are blocked by policy. "+
+				"Call mikrotik_help for full usage and security guidance.",
+		),
 	)
 	tools.Register(srv)
 

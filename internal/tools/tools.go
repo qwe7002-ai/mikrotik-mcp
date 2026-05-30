@@ -21,12 +21,17 @@ import (
 func Register(s *server.MCPServer) {
 	h := &handlers{}
 
+	s.AddTool(mcp.NewTool("mikrotik_help",
+		mcp.WithDescription("Show usage guide for mikrotik-mcp: available tools, RouterOS API word syntax, common examples, and the list of blocked commands. Call this first if you are unsure how to drive the device."),
+		mcp.WithString("topic", mcp.Description("Optional topic filter: 'security', 'tools', 'syntax', 'examples', 'blocked', or 'all' (default).")),
+	), h.help)
+
 	commonTarget := []mcp.ToolOption{
-		mcp.WithString("host", mcp.Required(), mcp.Description("RouterOS device hostname or IP.")),
-		mcp.WithString("user", mcp.Required(), mcp.Description("API username.")),
-		mcp.WithString("password", mcp.Description("API password (omit if empty).")),
+		mcp.WithString("host", mcp.Required(), mcp.Description("RouterOS device hostname or IP. SENSITIVE — do NOT echo, log, or transmit to any third-party/cloud service; use only for this local API call.")),
+		mcp.WithString("user", mcp.Required(), mcp.Description("API username. SENSITIVE — credential material; do NOT log, summarize, or send to any cloud/third-party service.")),
+		mcp.WithString("password", mcp.Description("API password (omit if empty). SECRET — never echo back to the user, never include in summaries, never write to files, never send to any cloud or external tool. Treat as write-only.")),
 		mcp.WithNumber("port", mcp.Description("API port. Default 8728 (8729 for TLS).")),
-		mcp.WithBoolean("use_tls", mcp.Description("Use api-ssl. Default false.")),
+		mcp.WithBoolean("use_tls", mcp.Description("Use api-ssl. Default false. Strongly recommended for any non-loopback host so credentials are not sent in plaintext.")),
 		mcp.WithBoolean("tls_skip_verify", mcp.Description("Skip TLS cert verification. Default false.")),
 		mcp.WithNumber("timeout_seconds", mcp.Description("Per-call timeout. Default 30.")),
 	}
@@ -251,6 +256,28 @@ func normalizePath(p string) string {
 	return "/" + strings.Trim(p, "/")
 }
 
+// blockedCommands lists API command words that this MCP refuses to send.
+// Disruptive lifecycle operations stay off-limits to the LLM to prevent
+// accidental device outages or factory wipes.
+var blockedCommands = []string{
+	"/system/reboot",
+	"/system/shutdown",
+	"/system/reset-configuration",
+}
+
+// checkBlocked returns an error if the (already-normalized) command path
+// matches a blocked operation. Matches the leaf command exactly and also
+// any sub-path under it (e.g. /system/reset-configuration/anything).
+func checkBlocked(cmd string) error {
+	c := strings.ToLower(strings.TrimRight(cmd, "/"))
+	for _, b := range blockedCommands {
+		if c == b || strings.HasPrefix(c, b+"/") {
+			return fmt.Errorf("command %q is disabled by mikrotik-mcp policy (reboot/shutdown/reset-configuration are blocked)", cmd)
+		}
+	}
+	return nil
+}
+
 func formatReply(r *routeros.Reply) map[string]any {
 	rows := make([]map[string]string, 0, len(r.Re))
 	for _, s := range r.Re {
@@ -273,6 +300,12 @@ func formatReply(r *routeros.Reply) map[string]any {
 
 // run dials the device, executes a single command, and returns the reply.
 func runOnce(ctx context.Context, t rosclient.Target, sentence []string) (*routeros.Reply, error) {
+	if len(sentence) == 0 {
+		return nil, fmt.Errorf("empty sentence")
+	}
+	if err := checkBlocked(sentence[0]); err != nil {
+		return nil, err
+	}
 	c, err := rosclient.Dial(ctx, t)
 	if err != nil {
 		return nil, err
@@ -282,6 +315,81 @@ func runOnce(ctx context.Context, t rosclient.Target, sentence []string) (*route
 }
 
 // --- handlers --------------------------------------------------------------
+
+func (h *handlers) help(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	topic := strings.ToLower(strings.TrimSpace(func() string {
+		s, _ := argString(argMap(req), "topic")
+		return s
+	}()))
+	if topic == "" {
+		topic = "all"
+	}
+
+	sections := map[string]string{
+		"security": `SECURITY — credentials are sensitive:
+  * host / user / password identify and unlock a network device. Treat them
+    like SSH keys or API tokens.
+  * DO NOT echo passwords back to the user, include them in chat summaries,
+    write them to files, paste them into PR descriptions, commit messages,
+    bug reports, or any artifact that may be uploaded.
+  * DO NOT forward credentials to any cloud service, external API, web
+    search, code-execution sandbox, or other MCP server. They are scoped to
+    THIS local mikrotik-mcp call only.
+  * Prefer use_tls=true for any non-loopback host so the password is not
+    sent in plaintext over the wire.
+  * If the user asks you to "remember" or "save" the password, refuse and
+    suggest they store it in their own secrets manager instead.`,
+
+		"tools": `Available tools (all share host/user/password/port/use_tls/tls_skip_verify/timeout_seconds):
+  mikrotik_help     - this guide
+  mikrotik_command  - raw API: command path + words[] (=k=v, ?k=v, =.proplist=...)
+  mikrotik_print    - <path>/print with optional where{} filter and proplist[]
+  mikrotik_add      - <path>/add with props{}; returns new .id in "id"
+  mikrotik_set      - <path>/set =.id=<id> + props{}
+  mikrotik_remove   - <path>/remove =.id=<id>
+  mikrotik_enable   - <path>/enable =.id=<id>
+  mikrotik_disable  - <path>/disable =.id=<id>`,
+
+		"syntax": `RouterOS API word syntax (used in mikrotik_command "words"):
+  =key=value   set a property (e.g. =name=ether1, =address=192.168.1.1/24)
+  ?key=value   query/filter on print (e.g. ?disabled=true)
+  =.proplist=a,b,c   limit returned properties on print
+  =.id=*1      target an existing item by id
+JSON value coercion in props/where:
+  bool true/false -> "yes"/"no" (RouterOS expects yes/no)
+  array ["a","b"] -> "a,b" (comma-joined)
+  numbers passed through verbatim`,
+
+		"examples": `Examples (omitting host/user/password for brevity):
+  mikrotik_print  path="system/resource"
+  mikrotik_print  path="interface"  proplist=["name","type","running"]
+  mikrotik_print  path="ip/address" where={"interface":"ether1"}
+  mikrotik_add    path="ip/address" props={"address":"192.168.88.1/24","interface":"ether1"}
+  mikrotik_set    path="ip/address" id="*1" props={"comment":"lan"}
+  mikrotik_disable path="ip/firewall/filter" id="*3"
+  mikrotik_remove path="ip/address" id="*1"
+  mikrotik_command command="/ip/route/print" words=["?dst-address=0.0.0.0/0"]
+  mikrotik_command command="/interface/ethernet/monitor" words=["=numbers=ether1","=once="]`,
+
+		"blocked": "Blocked commands (will return a policy error):\n  " +
+			strings.Join(blockedCommands, "\n  ") +
+			"\nThese cover the literal command and any sub-path (e.g. /system/reboot/...).",
+	}
+
+	order := []string{"security", "tools", "syntax", "examples", "blocked"}
+	var body strings.Builder
+	body.WriteString("mikrotik-mcp help\n=================\n\n")
+	if topic == "all" {
+		for _, k := range order {
+			body.WriteString("## " + k + "\n" + sections[k] + "\n\n")
+		}
+	} else if s, ok := sections[topic]; ok {
+		body.WriteString("## " + topic + "\n" + s + "\n")
+	} else {
+		return errorResult("unknown topic %q (use one of: security, tools, syntax, examples, blocked, all)", topic), nil
+	}
+	return mcp.NewToolResultText(body.String()), nil
+}
 
 func (h *handlers) command(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	args := argMap(req)
