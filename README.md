@@ -1,5 +1,7 @@
 # mikrotik-mcp
 
+![build](https://github.com/qwe7002-ai/mikrotik-mcp/actions/workflows/build.yml/badge.svg)
+
 An [MCP](https://modelcontextprotocol.io) server for managing MikroTik RouterOS
 devices through the binary API, plus a small terminal UI (TUI) for storing your
 login details so they never have to be typed into the conversation.
