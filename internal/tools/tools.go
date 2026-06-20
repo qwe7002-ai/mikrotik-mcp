@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-routeros/routeros/v3"
@@ -60,6 +61,14 @@ func Register(s *server.MCPServer) {
 			mcp.WithString("destination", mcp.Description("Optional .id to move the item before. Omit to move the item to the end of the list.")),
 		)...,
 	), h.move)
+
+	s.AddTool(mcp.NewTool("mikrotik_multi_command",
+		mcp.WithDescription("Control-center fan-out: run the SAME RouterOS API command across MULTIPLE saved profiles CONCURRENTLY, returning a per-device result or error. Use for fleet-wide reads (e.g. /system/resource/print) or coordinated changes across devices. Each device is dialed independently with its saved profile; the blocked-command policy still applies. Prefer read commands; be careful with writes across many devices."),
+		mcp.WithArray("profiles", mcp.Required(), mcp.Description("Saved profile names to target. Use mikrotik_profiles to discover names. Pass [\"*\"] or [\"all\"] to target every saved profile.")),
+		mcp.WithString("command", mcp.Required(), mcp.Description("API command path applied to every device, e.g. /system/resource/print, /interface/print.")),
+		mcp.WithArray("words", mcp.Description("Additional raw API words applied to every device (e.g. =.proplist=name,version, ?disabled=true).")),
+		mcp.WithNumber("timeout_seconds", mcp.Description("Per-device timeout. Default 30.")),
+	), h.multiCommand)
 
 	s.AddTool(mcp.NewTool("mikrotik_command",
 		with(
@@ -401,6 +410,7 @@ func (h *handlers) help(_ context.Context, req mcp.CallToolRequest) (*mcp.CallTo
   mikrotik_help     - this guide
   mikrotik_profiles - list saved connection profile names (no passwords)
   mikrotik_test_connection - dial + login, return identity/version (no changes)
+  mikrotik_multi_command - run one command across MANY profiles concurrently
   mikrotik_command  - raw API: command path + words[] (=k=v, ?k=v, =.proplist=...)
   mikrotik_print    - <path>/print with optional where{} filter and proplist[]
   mikrotik_add      - <path>/add with props{}; returns new .id in "id"
@@ -550,6 +560,115 @@ func (h *handlers) move(ctx context.Context, req mcp.CallToolRequest) (*mcp.Call
 		return errorResult("api: %v", err), nil
 	}
 	return jsonResult(formatReply(r)), nil
+}
+
+// profileTarget builds a connection target straight from a saved profile.
+func profileTarget(p config.Profile) rosclient.Target {
+	timeout := p.TimeoutSeconds
+	if timeout <= 0 {
+		timeout = 30
+	}
+	return rosclient.Target{
+		Host:          p.Host,
+		User:          p.User,
+		Password:      p.Password,
+		Port:          p.Port,
+		UseTLS:        p.UseTLS,
+		TLSSkipVerify: p.TLSSkipVerify,
+		Timeout:       time.Duration(timeout) * time.Second,
+	}
+}
+
+// multiCommand fans the same command out across multiple profiles concurrently
+// and aggregates a per-device result/error. This is the control-center
+// "control multiple RouterOS at once" primitive.
+func (h *handlers) multiCommand(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := argMap(req)
+	cmd, ok := argString(args, "command")
+	if !ok || cmd == "" {
+		return errorResult("missing 'command'"), nil
+	}
+	names := argStringSlice(args, "profiles")
+	if len(names) == 0 {
+		return errorResult("missing 'profiles' (list of saved profile names, or [\"*\"] for all)"), nil
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		return errorResult("load profiles: %v", err), nil
+	}
+	// Expand the "all" wildcard.
+	if len(names) == 1 && (names[0] == "*" || strings.EqualFold(names[0], "all")) {
+		names = names[:0]
+		for _, p := range cfg.Profiles {
+			names = append(names, p.Name)
+		}
+	}
+	if len(names) == 0 {
+		return errorResult("no profiles saved to target (add one with `mikrotik-mcp tui`)"), nil
+	}
+
+	sentence := append([]string{normalizePath(cmd)}, argStringSlice(args, "words")...)
+	if err := checkBlocked(sentence[0]); err != nil {
+		return errorResult("%v", err), nil
+	}
+
+	timeoutOverride := argInt(args, "timeout_seconds", 0)
+
+	type devResult struct {
+		Profile string         `json:"profile"`
+		OK      bool           `json:"ok"`
+		Error   string         `json:"error,omitempty"`
+		Result  map[string]any `json:"result,omitempty"`
+	}
+
+	results := make([]devResult, len(names))
+	var wg sync.WaitGroup
+	for i, name := range names {
+		i, name := i, name
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results[i].Profile = name
+			p, found := cfg.Get(name)
+			if !found {
+				results[i].Error = "unknown profile"
+				return
+			}
+			t := profileTarget(p)
+			if timeoutOverride > 0 {
+				t.Timeout = time.Duration(timeoutOverride) * time.Second
+			}
+			c, err := rosclient.Dial(ctx, t)
+			if err != nil {
+				results[i].Error = err.Error()
+				return
+			}
+			defer c.Close()
+			r, err := c.RunArgsContext(ctx, sentence)
+			if err != nil {
+				results[i].Error = err.Error()
+				return
+			}
+			results[i].OK = true
+			results[i].Result = formatReply(r)
+		}()
+	}
+	wg.Wait()
+
+	okCount := 0
+	for _, r := range results {
+		if r.OK {
+			okCount++
+		}
+	}
+	return jsonResult(map[string]any{
+		"command":   normalizePath(cmd),
+		"targets":   len(results),
+		"succeeded": okCount,
+		"failed":    len(results) - okCount,
+		"results":   results,
+	}), nil
 }
 
 func (h *handlers) command(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {

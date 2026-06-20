@@ -104,6 +104,25 @@ If `connected` is `false`, report the `error` field and check, in order: the API
 service is enabled on the device, the host/port are reachable, TLS settings
 match the service (8728 plain vs 8729 api-ssl), and the username/password.
 
+## 4b. (Optional) Control-center mode over HTTPS
+
+If the user wants a central instance reachable by remote clients that drives
+multiple RouterOS devices, run control-center mode instead of (or alongside)
+stdio. It serves the same tools over HTTPS and requires a bearer token:
+
+```sh
+export MIKROTIK_MCP_TOKEN="$(openssl rand -hex 24)"   # share this with clients
+./mikrotik-mcp control-center --addr :8443 --cert-host <public-host>
+# production TLS: add --tls-cert /path/cert.pem --tls-key /path/key.pem
+```
+
+Then register it in the client as a remote MCP server at
+`https://<host>:8443/mcp` with header `Authorization: Bearer <token>`. Clients
+pick a device per call via `profile`, or fan out with `mikrotik_multi_command`.
+Remind the user this exposes device control on the network: use a strong token,
+real TLS, and firewall the port. Without `--tls-cert/--tls-key` an ephemeral
+self-signed cert is used (clients must skip verification or pin it).
+
 ## 5. Done
 
 Summarize for the user: binary path, that the MCP server is registered, the

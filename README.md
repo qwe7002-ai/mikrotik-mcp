@@ -25,11 +25,47 @@ go build -o mikrotik-mcp ./cmd/mikrotik-mcp
 ## Commands
 
 ```
-mikrotik-mcp [serve]   Run the MCP server over stdio (default)
-mikrotik-mcp tui       Manage saved connection profiles interactively
-mikrotik-mcp version   Print version
-mikrotik-mcp help      Show usage
+mikrotik-mcp [serve]          Run the MCP server over stdio (default)
+mikrotik-mcp control-center   Serve the MCP over HTTPS for multiple clients/devices
+mikrotik-mcp tui              Manage saved connection profiles interactively
+mikrotik-mcp version          Print version
+mikrotik-mcp help             Show usage
 ```
+
+## Control center (HTTPS)
+
+`serve` mode talks to a single client over stdio. **Control-center mode** instead
+serves the same tools over **HTTPS** (the MCP Streamable HTTP transport) so a
+central instance can be reached by remote clients and drive **multiple RouterOS
+devices** through the saved profiles.
+
+```sh
+export MIKROTIK_MCP_TOKEN="$(openssl rand -hex 24)"   # required bearer token
+mikrotik-mcp control-center --addr :8443 --cert-host mcp.example.com
+```
+
+- Endpoint: `https://<host>:8443/mcp` — every request must send
+  `Authorization: Bearer <token>`.
+- Health probe: `https://<host>:8443/healthz` (no auth).
+- TLS: pass `--tls-cert` and `--tls-key` for a real certificate. If omitted, an
+  **ephemeral self-signed** cert is generated for `--cert-host` (clients must
+  skip verification or pin it — fine behind a reverse proxy / for testing).
+
+| Flag | Env | Default |
+| ---- | --- | ------- |
+| `--addr` | `MIKROTIK_MCP_ADDR` | `:8443` |
+| `--token` | `MIKROTIK_MCP_TOKEN` | *(required)* |
+| `--tls-cert` | `MIKROTIK_MCP_TLS_CERT` | self-signed |
+| `--tls-key` | `MIKROTIK_MCP_TLS_KEY` | self-signed |
+| `--cert-host` | `MIKROTIK_MCP_CERT_HOST` | `localhost` |
+
+Configure it as a remote MCP server in your client (URL + bearer token). Select
+the target device per call with the `profile` argument, or operate on the whole
+fleet at once with **`mikrotik_multi_command`** (runs one command across many
+profiles concurrently).
+
+> Control-center mode exposes device control over the network. Always set a
+> strong token, terminate TLS properly, and restrict who can reach the port.
 
 ## Login profiles (TUI)
 
@@ -65,6 +101,8 @@ the matching profile field.
 - `mikrotik_test_connection` — dial + log in and return identity/version/uptime
   to verify a profile or inline credentials work (makes no changes).
 - `mikrotik_move` — reorder an item in an ordered list (firewall/NAT/queue).
+- `mikrotik_multi_command` — run one command across many profiles at once
+  (control-center fan-out); pass `profiles: ["a","b"]` or `["*"]` for all.
 - `mikrotik_print`, `mikrotik_command`, `mikrotik_add`, … — pass
   `profile: "<name>"` instead of inline credentials.
 
