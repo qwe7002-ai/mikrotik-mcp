@@ -1,10 +1,22 @@
 # mikrotik-mcp
 
+![build](https://github.com/qwe7002-ai/mikrotik-mcp/actions/workflows/build.yml/badge.svg)
+
 An [MCP](https://modelcontextprotocol.io) server for managing MikroTik RouterOS
 devices through the binary API, plus a small terminal UI (TUI) for storing your
 login details so they never have to be typed into the conversation.
 
-## Build
+## Install
+
+Using [Claude Code](https://claude.com/claude-code), the bundled
+**`install-mikrotik-mcp`** skill walks you through the whole setup — building the
+binary, registering it as an MCP server, saving a login profile via the TUI, and
+verifying the connection. Just ask Claude to "install mikrotik-mcp". A second
+skill, **`use-mikrotik-mcp`**, teaches the assistant how to operate the device
+through the tools (profile-first connections, RouterOS API syntax, safe rule
+editing) and loads automatically when it manages a RouterOS device.
+
+Manual build:
 
 ```sh
 go build -o mikrotik-mcp ./cmd/mikrotik-mcp
@@ -50,6 +62,9 @@ host/user/password and TLS settings are used; any inline field still overrides
 the matching profile field.
 
 - `mikrotik_profiles` — list saved profile names and metadata (never passwords).
+- `mikrotik_test_connection` — dial + log in and return identity/version/uptime
+  to verify a profile or inline credentials work (makes no changes).
+- `mikrotik_move` — reorder an item in an ordered list (firewall/NAT/queue).
 - `mikrotik_print`, `mikrotik_command`, `mikrotik_add`, … — pass
   `profile: "<name>"` instead of inline credentials.
 
