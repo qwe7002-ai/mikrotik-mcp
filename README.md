@@ -6,7 +6,14 @@ An [MCP](https://modelcontextprotocol.io) server for managing MikroTik RouterOS
 devices through the binary API, plus a small terminal UI (TUI) for storing your
 login details so they never have to be typed into the conversation.
 
-## Build
+## Install
+
+Using [Claude Code](https://claude.com/claude-code), the bundled
+**`install-mikrotik-mcp`** skill walks you through the whole setup — building the
+binary, registering it as an MCP server, saving a login profile via the TUI, and
+verifying the connection. Just ask Claude to "install mikrotik-mcp".
+
+Manual build:
 
 ```sh
 go build -o mikrotik-mcp ./cmd/mikrotik-mcp
