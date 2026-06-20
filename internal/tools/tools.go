@@ -46,6 +46,21 @@ func Register(s *server.MCPServer) {
 		return append(append([]mcp.ToolOption{}, commonTarget...), extra...)
 	}
 
+	s.AddTool(mcp.NewTool("mikrotik_test_connection",
+		with(
+			mcp.WithDescription("Verify that the connection works: dial the device, log in, and read non-destructive identity/resource info. Use this to confirm a saved 'profile' or inline credentials are valid before running other commands. Returns the device identity, RouterOS version, board name, and uptime. Performs no changes."),
+		)...,
+	), h.testConnection)
+
+	s.AddTool(mcp.NewTool("mikrotik_move",
+		with(
+			mcp.WithDescription("Reorder an item within an ordered list (e.g. ip/firewall/filter, ip/firewall/nat, ip/firewall/mangle, queue/simple). Moves the item with the given .id to sit just before 'destination'; omit 'destination' to move it to the end. Order is significant for firewall/NAT rules."),
+			mcp.WithString("path", mcp.Required(), mcp.Description("Menu path of the ordered list, e.g. 'ip/firewall/filter'.")),
+			mcp.WithString("id", mcp.Required(), mcp.Description("The .id of the item to move (e.g. '*3').")),
+			mcp.WithString("destination", mcp.Description("Optional .id to move the item before. Omit to move the item to the end of the list.")),
+		)...,
+	), h.move)
+
 	s.AddTool(mcp.NewTool("mikrotik_command",
 		with(
 			mcp.WithDescription("Run a raw RouterOS API sentence. Provide the command path and an optional list of API words (e.g. =name=value, ?disabled=true, =.proplist=name,address). Returns parsed reply rows plus the !done sentence."),
@@ -385,13 +400,15 @@ func (h *handlers) help(_ context.Context, req mcp.CallToolRequest) (*mcp.CallTo
 (inline fields override the profile). Users manage profiles with ` + "`mikrotik-mcp tui`" + `.
   mikrotik_help     - this guide
   mikrotik_profiles - list saved connection profile names (no passwords)
+  mikrotik_test_connection - dial + login, return identity/version (no changes)
   mikrotik_command  - raw API: command path + words[] (=k=v, ?k=v, =.proplist=...)
   mikrotik_print    - <path>/print with optional where{} filter and proplist[]
   mikrotik_add      - <path>/add with props{}; returns new .id in "id"
   mikrotik_set      - <path>/set =.id=<id> + props{}
   mikrotik_remove   - <path>/remove =.id=<id>
   mikrotik_enable   - <path>/enable =.id=<id>
-  mikrotik_disable  - <path>/disable =.id=<id>`,
+  mikrotik_disable  - <path>/disable =.id=<id>
+  mikrotik_move     - <path>/move =numbers=<id> [=destination=<id>] (reorder rules)`,
 
 		"syntax": `RouterOS API word syntax (used in mikrotik_command "words"):
   =key=value   set a property (e.g. =name=ether1, =address=192.168.1.1/24)
@@ -410,6 +427,8 @@ JSON value coercion in props/where:
   mikrotik_add    path="ip/address" props={"address":"192.168.88.1/24","interface":"ether1"}
   mikrotik_set    path="ip/address" id="*1" props={"comment":"lan"}
   mikrotik_disable path="ip/firewall/filter" id="*3"
+  mikrotik_move   path="ip/firewall/filter" id="*5" destination="*1"
+  mikrotik_test_connection profile="home-router"
   mikrotik_remove path="ip/address" id="*1"
   mikrotik_command command="/ip/route/print" words=["?dst-address=0.0.0.0/0"]
   mikrotik_command command="/interface/ethernet/monitor" words=["=numbers=ether1","=once="]`,
@@ -466,6 +485,71 @@ func (h *handlers) profiles(_ context.Context, _ mcp.CallToolRequest) (*mcp.Call
 		"path":     path,
 		"hint":     "Pass a 'name' value as the 'profile' argument to other tools. Manage profiles with `mikrotik-mcp tui`.",
 	}), nil
+}
+
+// testConnection dials and logs in, then reads identity/resource info to prove
+// the credentials work. It makes no changes to the device.
+func (h *handlers) testConnection(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	t, err := target(argMap(req))
+	if err != nil {
+		return errorResult("%v", err), nil
+	}
+	c, err := rosclient.Dial(ctx, t)
+	if err != nil {
+		return jsonResult(map[string]any{
+			"connected": false,
+			"address":   t.Address(),
+			"error":     err.Error(),
+		}), nil
+	}
+	defer c.Close()
+
+	info := map[string]any{
+		"connected": true,
+		"address":   t.Address(),
+		"use_tls":   t.UseTLS,
+	}
+	// Best-effort enrichment; a login that succeeds is already proof of life.
+	if r, err := c.RunArgsContext(ctx, []string{"/system/identity/print"}); err == nil && len(r.Re) > 0 {
+		if name, ok := r.Re[0].Map["name"]; ok {
+			info["identity"] = name
+		}
+	}
+	if r, err := c.RunArgsContext(ctx, []string{"/system/resource/print"}); err == nil && len(r.Re) > 0 {
+		m := r.Re[0].Map
+		for _, k := range []string{"version", "board-name", "uptime", "architecture-name"} {
+			if v, ok := m[k]; ok {
+				info[strings.ReplaceAll(k, "-", "_")] = v
+			}
+		}
+	}
+	return jsonResult(info), nil
+}
+
+// move reorders an item within an ordered list using RouterOS /move.
+func (h *handlers) move(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := argMap(req)
+	t, err := target(args)
+	if err != nil {
+		return errorResult("%v", err), nil
+	}
+	p, ok := argString(args, "path")
+	if !ok || p == "" {
+		return errorResult("missing 'path'"), nil
+	}
+	id, ok := argString(args, "id")
+	if !ok || id == "" {
+		return errorResult("missing 'id'"), nil
+	}
+	sentence := []string{normalizePath(p) + "/move", "=numbers=" + id}
+	if dest, ok := argString(args, "destination"); ok && strings.TrimSpace(dest) != "" {
+		sentence = append(sentence, "=destination="+dest)
+	}
+	r, err := runOnce(ctx, t, sentence)
+	if err != nil {
+		return errorResult("api: %v", err), nil
+	}
+	return jsonResult(formatReply(r)), nil
 }
 
 func (h *handlers) command(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {

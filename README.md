@@ -52,6 +52,9 @@ host/user/password and TLS settings are used; any inline field still overrides
 the matching profile field.
 
 - `mikrotik_profiles` — list saved profile names and metadata (never passwords).
+- `mikrotik_test_connection` — dial + log in and return identity/version/uptime
+  to verify a profile or inline credentials work (makes no changes).
+- `mikrotik_move` — reorder an item in an ordered list (firewall/NAT/queue).
 - `mikrotik_print`, `mikrotik_command`, `mikrotik_add`, … — pass
   `profile: "<name>"` instead of inline credentials.
 
