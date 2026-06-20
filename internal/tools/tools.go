@@ -14,6 +14,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
+	"github.com/qwe7002/mikrotik-mcp/internal/config"
 	"github.com/qwe7002/mikrotik-mcp/internal/rosclient"
 )
 
@@ -26,10 +27,15 @@ func Register(s *server.MCPServer) {
 		mcp.WithString("topic", mcp.Description("Optional topic filter: 'security', 'tools', 'syntax', 'examples', 'blocked', or 'all' (default).")),
 	), h.help)
 
+	s.AddTool(mcp.NewTool("mikrotik_profiles",
+		mcp.WithDescription("List the names of saved connection profiles (configured by the user via `mikrotik-mcp tui`). Returns only non-sensitive metadata (name, host, user, port, tls) — never passwords. Pass a returned name as the 'profile' argument to other tools to connect without inline credentials."),
+	), h.profiles)
+
 	commonTarget := []mcp.ToolOption{
-		mcp.WithString("host", mcp.Required(), mcp.Description("RouterOS device hostname or IP. SENSITIVE — do NOT echo, log, or transmit to any third-party/cloud service; use only for this local API call.")),
-		mcp.WithString("user", mcp.Required(), mcp.Description("API username. SENSITIVE — credential material; do NOT log, summarize, or send to any cloud/third-party service.")),
-		mcp.WithString("password", mcp.Description("API password (omit if empty). SECRET — never echo back to the user, never include in summaries, never write to files, never send to any cloud or external tool. Treat as write-only.")),
+		mcp.WithString("profile", mcp.Description("Name of a saved connection profile (configured by the user via `mikrotik-mcp tui`). When set, its host/user/password and TLS settings are used so credentials stay out of the conversation. Inline fields below override matching profile fields. Use mikrotik_profiles to list available profile names.")),
+		mcp.WithString("host", mcp.Description("RouterOS device hostname or IP. Required unless 'profile' supplies it. SENSITIVE — do NOT echo, log, or transmit to any third-party/cloud service; use only for this local API call.")),
+		mcp.WithString("user", mcp.Description("API username. Required unless 'profile' supplies it. SENSITIVE — credential material; do NOT log, summarize, or send to any cloud/third-party service.")),
+		mcp.WithString("password", mcp.Description("API password (omit if empty or provided by 'profile'). SECRET — never echo back to the user, never include in summaries, never write to files, never send to any cloud or external tool. Treat as write-only.")),
 		mcp.WithNumber("port", mcp.Description("API port. Default 8728 (8729 for TLS).")),
 		mcp.WithBoolean("use_tls", mcp.Description("Use api-ssl. Default false. Strongly recommended for any non-loopback host so credentials are not sent in plaintext.")),
 		mcp.WithBoolean("tls_skip_verify", mcp.Description("Skip TLS cert verification. Default false.")),
@@ -218,24 +224,58 @@ func anyToString(v any) string {
 	}
 }
 
+// target builds a connection target from the tool arguments. If a 'profile'
+// name is given, the saved profile provides the defaults; any inline argument
+// (host, user, password, port, use_tls, tls_skip_verify, timeout_seconds)
+// overrides the matching profile field.
 func target(args map[string]any) (rosclient.Target, error) {
-	host, ok := argString(args, "host")
-	if !ok || host == "" {
-		return rosclient.Target{}, errors.New("missing 'host'")
+	var base config.Profile
+	if name, ok := argString(args, "profile"); ok && strings.TrimSpace(name) != "" {
+		cfg, err := config.Load()
+		if err != nil {
+			return rosclient.Target{}, fmt.Errorf("load profiles: %w", err)
+		}
+		p, found := cfg.Get(strings.TrimSpace(name))
+		if !found {
+			return rosclient.Target{}, fmt.Errorf("unknown profile %q (use mikrotik_profiles to list saved profiles)", name)
+		}
+		base = p
 	}
-	user, ok := argString(args, "user")
-	if !ok || user == "" {
-		return rosclient.Target{}, errors.New("missing 'user'")
+
+	host := base.Host
+	if v, ok := argString(args, "host"); ok && v != "" {
+		host = v
 	}
-	pwd, _ := argString(args, "password")
+	if host == "" {
+		return rosclient.Target{}, errors.New("missing 'host' (provide it inline or via a saved 'profile')")
+	}
+
+	user := base.User
+	if v, ok := argString(args, "user"); ok && v != "" {
+		user = v
+	}
+	if user == "" {
+		return rosclient.Target{}, errors.New("missing 'user' (provide it inline or via a saved 'profile')")
+	}
+
+	pwd := base.Password
+	if v, ok := argString(args, "password"); ok {
+		pwd = v
+	}
+
+	timeout := base.TimeoutSeconds
+	if timeout <= 0 {
+		timeout = 30
+	}
+
 	return rosclient.Target{
 		Host:          host,
 		User:          user,
 		Password:      pwd,
-		Port:          argInt(args, "port", 0),
-		UseTLS:        argBool(args, "use_tls", false),
-		TLSSkipVerify: argBool(args, "tls_skip_verify", false),
-		Timeout:       time.Duration(argInt(args, "timeout_seconds", 30)) * time.Second,
+		Port:          argInt(args, "port", base.Port),
+		UseTLS:        argBool(args, "use_tls", base.UseTLS),
+		TLSSkipVerify: argBool(args, "tls_skip_verify", base.TLSSkipVerify),
+		Timeout:       time.Duration(argInt(args, "timeout_seconds", timeout)) * time.Second,
 	}, nil
 }
 
@@ -340,8 +380,11 @@ func (h *handlers) help(_ context.Context, req mcp.CallToolRequest) (*mcp.CallTo
   * If the user asks you to "remember" or "save" the password, refuse and
     suggest they store it in their own secrets manager instead.`,
 
-		"tools": `Available tools (all share host/user/password/port/use_tls/tls_skip_verify/timeout_seconds):
+		"tools": `Available tools. Connection args are shared: either pass a saved
+'profile' name OR inline host/user/password/port/use_tls/tls_skip_verify/timeout_seconds
+(inline fields override the profile). Users manage profiles with ` + "`mikrotik-mcp tui`" + `.
   mikrotik_help     - this guide
+  mikrotik_profiles - list saved connection profile names (no passwords)
   mikrotik_command  - raw API: command path + words[] (=k=v, ?k=v, =.proplist=...)
   mikrotik_print    - <path>/print with optional where{} filter and proplist[]
   mikrotik_add      - <path>/add with props{}; returns new .id in "id"
@@ -389,6 +432,40 @@ JSON value coercion in props/where:
 		return errorResult("unknown topic %q (use one of: security, tools, syntax, examples, blocked, all)", topic), nil
 	}
 	return mcp.NewToolResultText(body.String()), nil
+}
+
+// profiles lists saved connection profiles without exposing passwords.
+func (h *handlers) profiles(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return errorResult("load profiles: %v", err), nil
+	}
+	type entry struct {
+		Name        string `json:"name"`
+		Host        string `json:"host"`
+		User        string `json:"user"`
+		Port        int    `json:"port,omitempty"`
+		UseTLS      bool   `json:"use_tls"`
+		HasPassword bool   `json:"has_password"`
+	}
+	list := make([]entry, 0, len(cfg.Profiles))
+	for _, p := range cfg.Profiles {
+		list = append(list, entry{
+			Name:        p.Name,
+			Host:        p.Host,
+			User:        p.User,
+			Port:        p.Port,
+			UseTLS:      p.UseTLS,
+			HasPassword: p.Password != "",
+		})
+	}
+	path, _ := config.Path()
+	return jsonResult(map[string]any{
+		"profiles": list,
+		"count":    len(list),
+		"path":     path,
+		"hint":     "Pass a 'name' value as the 'profile' argument to other tools. Manage profiles with `mikrotik-mcp tui`.",
+	}), nil
 }
 
 func (h *handlers) command(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
