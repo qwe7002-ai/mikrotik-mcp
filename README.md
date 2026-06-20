@@ -11,7 +11,10 @@ login details so they never have to be typed into the conversation.
 Using [Claude Code](https://claude.com/claude-code), the bundled
 **`install-mikrotik-mcp`** skill walks you through the whole setup — building the
 binary, registering it as an MCP server, saving a login profile via the TUI, and
-verifying the connection. Just ask Claude to "install mikrotik-mcp".
+verifying the connection. Just ask Claude to "install mikrotik-mcp". A second
+skill, **`use-mikrotik-mcp`**, teaches the assistant how to operate the device
+through the tools (profile-first connections, RouterOS API syntax, safe rule
+editing) and loads automatically when it manages a RouterOS device.
 
 Manual build:
 
