@@ -43,6 +43,7 @@ Treat them as write-only inputs to these local calls.
 | `mikrotik_remove` | Delete an item: `path` + `id`. |
 | `mikrotik_enable` / `mikrotik_disable` | Toggle an item by `path` + `id`. |
 | `mikrotik_move` | Reorder a rule: `path` + `id` + optional `destination`. |
+| `mikrotik_multi_command` | Fan one command across many profiles concurrently. |
 | `mikrotik_command` | Raw API escape hatch: `command` path + `words[]`. |
 
 Paths are written WITHOUT a leading slash and WITHOUT `/print` etc., e.g.
@@ -91,6 +92,19 @@ by `.id`s obtained from a `print`:
 mikrotik_move path="ip/firewall/filter" id="*5" destination="*1" profile="rtr"
 # moves *5 to sit just before *1; omit destination to move it to the end.
 ```
+
+## Operating many devices at once (control center)
+
+When the server runs in control-center mode it can reach every saved profile.
+To act on a whole fleet in one call, use **`mikrotik_multi_command`**:
+```
+mikrotik_multi_command profiles=["edge-1","edge-2"] command="/system/resource/print"
+mikrotik_multi_command profiles=["*"] command="/interface/print" words=["=.proplist=name,running"]
+```
+It dials each device concurrently and returns a per-device `{profile, ok, result|error}`
+plus `succeeded`/`failed` counts; one unreachable device does not fail the others.
+The blocked-command policy still applies. Prefer read commands; for writes across
+many devices, confirm with the user first and consider doing them one at a time.
 
 ## Safety rules
 
